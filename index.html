@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Did you do it? · Daily check-in</title>
+<meta name="description" content="Daily check-in with exact timers. Did you do your focused work today? Everything stays in your browser.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 80 80" aria-hidden="true">
+        <circle cx="40" cy="42" r="28" fill="var(--muted)" stroke="currentColor" stroke-width="3.5"/>
+        <path d="M40 42V26M40 42l11 7M30 8h20" stroke="var(--muted-fg)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <div>
+        <h1>Did you do it?</h1>
+        <p class="sub">No to-do lists. Just the work that matters, a timer that counts exactly, and an honest yes or no every day.</p>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn icon" id="fsBtn" title="Fullscreen"></button>
+      <button class="btn icon" id="themeBtn" title="Light / dark"></button>
+    </div>
+  </header>
+  <main id="view"></main>
+  <footer>Everything stays in your browser (localStorage). Back up now and then under <b>Settings → Export</b>.</footer>
+</div>
+<div id="toast" class="toast" role="status"></div>
+<script src="telegram.config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
