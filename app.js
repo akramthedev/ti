@@ -59,11 +59,42 @@ function msOf(day, id) {
   return ms;
 }
 const goalMs = t => t.goalMin * 60000;
-// A day is done ONLY if the timer reached the goal. A past day below the goal is a miss. No manual input.
+// Ledger instead of a cliff. No percentages decide anything, only minutes:
+//   balance = (minutes worked - goal), carried from day to day, capped at +-1 goal.
+//   Overtime is banked and covers the next day. A shortfall is a debt, repaid by extra time the next day.
+//   yes     = reached 100% of the goal that day
+//   near    = below 100% but covered: you worked, and the ledger is square by the end of that day or the next
+//   no      = past day, you worked too little and it was not repaid (still shows its real %, never zero)
+const ratio = (day, t) => msOf(day, t.id) / goalMs(t);
+let ledgerCache = {};
+function ledger(t) {
+  const sec = Math.floor(Date.now() / 1000), c = ledgerCache[t.id];
+  if (c && c.sec === sec) return c.v;
+  const goal = goalMs(t), v = {}, t0 = todayKey();
+  let k = dayKeys()[0] && dayKeys()[0] < S.since ? dayKeys()[0] : S.since, bal = 0;
+  for (; k <= t0; k = addDays(k, 1)) {
+    const ms = msOf(k, t.id);
+    bal = Math.max(-goal, Math.min(goal, bal + ms - goal));
+    v[k] = { ms, bal };
+  }
+  ledgerCache[t.id] = { sec, v };
+  return v;
+}
+// minutes still owed from yesterday (0 when square). Doing this much EXTRA today makes yesterday count.
+function owed(t) {
+  const L = ledger(t), y = addDays(todayKey(), -1), today = L[todayKey()];
+  if (!(L[y] && L[y].ms > 0 && L[y].ms < goalMs(t) && L[y].bal < 0 && today)) return 0;
+  // unclamped on purpose: today's goal + yesterday's missing time, minus what today already has
+  return Math.max(0, goalMs(t) + -L[y].bal - today.ms);
+}
 function status(day, t) {
-  if (msOf(day, t.id) >= goalMs(t)) return 'yes';
+  const L = ledger(t), d = L[day];
+  if (d && d.ms >= goalMs(t)) return 'yes';
+  const n = d && L[addDays(day, 1)];
+  if (d && d.ms > 0 && (d.bal >= 0 || (n && n.ms > 0 && n.bal >= 0))) return 'near';
   return day < todayKey() ? 'no' : null;
 }
+const counts = (day, t) => { const s = status(day, t); return s === 'yes' || s === 'near'; };
 
 /* ---------- timer (timestamp based, so it is exact even if the tab sleeps) ---------- */
 function commit(now = Date.now()) {
@@ -81,6 +112,7 @@ function commit(now = Date.now()) {
 function startTimer(id) {
   if (S.running) commit();
   S.running = { id, start: Date.now(), since: Date.now() };
+  { const t = S.tasks.find(x => x.id === id); tgPing(`▶ ${t.icon || ''} <b>${esc(t.name)}</b> started`); }
   save(); render(); tgSync();
 }
 const AWAY_MS = 3 * 60 * 1000;
@@ -91,10 +123,12 @@ function awayDiscard(now) {
   (S.awayLog = S.awayLog || []).push({ at: now, gap, task: S.running.id });
   S.awayLog = S.awayLog.slice(-30);
   S.running = null; save(); tgSync();
+  tgPing(`⚠ Timer stopped. You were away for ${hm(gap)}, not counted.`);
   toast(`Timer paused. You were away for ${hm(gap)} and that time was not counted.`, 6000);
 }
 function stopTimer() {
   commit();
+  if (S.running) { const t = S.tasks.find(x => x.id === S.running.id); tgPing(`⏸ ${t.icon || ''} <b>${esc(t.name)}</b> paused · ${hm(msOf(todayKey(), t.id))}`); }
   S.running = null;
   save(); render(); tgSync();
 }
@@ -124,9 +158,9 @@ const hm = ms => {
 /* ---------- stats ---------- */
 function streak(t) {
   let k = todayKey();
-  if (status(k, t) !== 'yes') k = addDays(k, -1); // today still open: don't break the streak yet
+  if (!counts(k, t)) k = addDays(k, -1); // today still open: don't break the streak yet
   let n = 0;
-  while (status(k, t) === 'yes') { n++; k = addDays(k, -1); }
+  while (counts(k, t)) { n++; k = addDays(k, -1); }
   return n;
 }
 function lastDays(n, from = todayKey()) {
@@ -136,7 +170,7 @@ function stats(t) {
   const t0 = todayKey();
   const d30 = lastDays(30, t0);
   const d7 = lastDays(7, t0);
-  const hit30 = d30.filter(k => status(k, t) === 'yes').length;
+  const hit30 = d30.filter(k => counts(k, t)).length;
   const week = d7.reduce((a, k) => a + msOf(k, t.id), 0);
   let total = 0;
   for (const k in S.days) total += msOf(k, t.id);
@@ -186,11 +220,10 @@ function verdict(k) {
   const t0 = todayKey();
   if (k > t0) return 'f';
   const st = S.tasks.map(t => status(k, t));
-  const yes = st.filter(x => x === 'yes').length;
-  if (yes === S.tasks.length) return 'g';          // everything done
-  if (k === t0) return yes ? 'p' : 'open';         // today is still in progress
-  if (yes) return 'p';                              // some done
-  return 'r';                                       // red = day passed without reaching a goal
+  const effort = S.tasks.reduce((a, t) => a + Math.min(1, ratio(k, t)), 0) / S.tasks.length; // 0..1, real work
+  if (st.every(x => x === 'yes')) return 'g';       // everything at 100%
+  if (k === t0) return effort > 0 ? 'p' : 'open';   // today is still in progress
+  return effort > 0 ? 'p' : 'r';                    // any real work is never red. Red = nothing was done
 }
 const fmtDate = k => { const d = fromKey(k); return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()}`; };
 function plannerCard() {
@@ -205,7 +238,7 @@ function plannerCard() {
     if (c[v] !== undefined) c[v]++;
     const label = d.getDate() === 1 || i === 0 ? d.toLocaleDateString('en-GB', { month: 'short' }) : '';
     const isExam = k === last;
-    const mark = isExam ? `${pad(d.getDate())}.${pad(d.getMonth() + 1)}` : v === 'g' ? '✓' : v === 'r' ? '✕' : v === 'p' ? '½' : '';
+    const mark = isExam ? `${pad(d.getDate())}.${pad(d.getMonth() + 1)}` : v === 'g' ? '✓' : v === 'r' ? '✕' : v === 'p' ? Math.round(S.tasks.reduce((a, t) => a + Math.min(1, ratio(k, t)), 0) / S.tasks.length * 100) + '%' : '';
     cells += `<button class="blk ${v} ${k === t0 ? 'today' : ''} ${k === viewDay ? 'sel' : ''} ${k === last ? 'exam' : ''}" data-goto="${k}" title="${k} · ${prettyDay(k)}${k === last ? ' · EXAM' : ''}">
       <small>${label}</small><b>${isExam ? '🏁' : d.getDate()}</b><em>${mark}</em></button>`;
   }
@@ -221,7 +254,7 @@ function taskCard(t, isToday) {
   const goal = goalMs(t);
   return `<section class="card task s6 ${st === 'yes' ? 'done' : ''} ${running ? 'running' : ''}" data-task="${t.id}">
     <div class="card-h"><h3><span class="dot"></span>&nbsp; ${esc(t.name)}</h3>
-      <span class="badge ${st === 'yes' ? 'solid' : st === 'no' ? 'warn' : ''}">${st === 'yes' ? '✓ Goal reached' : st === 'no' ? '✗ Missed' : 'Goal ' + hm(goal)}</span></div>
+      <span class="badge ${st === 'yes' || st === 'near' ? 'solid' : st === 'no' ? 'warn' : ''}">${st === 'yes' ? '✓ Goal reached' : st === 'near' ? `◐ Counted · ${hm(msOf(viewDay, t.id))}` : st === 'no' ? `✗ Short · ${hm(msOf(viewDay, t.id))}` : 'Goal ' + hm(goal)}</span></div>
     <div class="card-b stack">
       <div>
         <div class="clock mono" data-clock>00:00:00</div>
@@ -233,6 +266,7 @@ function taskCard(t, isToday) {
           ? `<button class="btn primary lg" data-stop style="flex:1">❚❚ Pause</button>`
           : `<button class="btn primary lg" data-start="${t.id}" style="flex:1">▶ ${msOf(viewDay, t.id) > 0 ? 'Resume' : 'Start'} timer</button>`}
       </div>` : ''}
+      ${isToday && owed(t) > 0 ? `<div class="small">↩ Yesterday was ${hm(goalMs(t) - ledger(t)[addDays(todayKey(), -1)].ms)} short. Do <b>${hm(owed(t))}</b> more today (today's goal plus the missing time) and yesterday counts.</div>` : ''}
       <div class="lockline small">🔒 Only the timer counts. No manual edits, no skipping.</div>
     </div></section>`;
 }
@@ -249,7 +283,7 @@ function heatmap(t) {
     const ms = msOf(k, t.id), st = k < S.since ? null : status(k, t);
     let c = '';
     if (st === 'yes') c = 'l4';
-    else if (st === 'no') c = 'no';
+    else if (st === 'near') c = 'l3';
     else if (ms > 0) c = ms / goalMs(t) > .66 ? 'l3' : ms / goalMs(t) > .33 ? 'l2' : 'l1';
     cells += `<i class="${c} ${k === t0 ? 'today' : ''}" title="${k} · ${hm(ms)}${st ? ' · ' + st : ''}"></i>`;
   }
@@ -310,7 +344,7 @@ function tgText(t, day, final) {
   const ms = msOf(day, t.id), goal = goalMs(t), done = ms >= goal;
   const running = !final && S.running && S.running.id === t.id && day === todayKey();
   const left = Math.max(0, Math.round((fromKey(S.examDate) - fromKey(todayKey())) / 864e5));
-  const state = final ? (done ? '✅ <b>Goal reached</b>' : '❌ <b>Missed</b>')
+  const state = final ? (done ? '✅ <b>Goal reached</b>' : status(day, t) === 'near' ? `🟡 <b>Counted</b> (${Math.floor(ms / goal * 100)}%, covered by the ledger)` : `🔸 <b>Short</b> (${Math.floor(ms / goal * 100)}%)`)
     : running ? `🟢 <b>Running</b> since ${hhmm(S.running.since || S.running.start)}`
     : done ? '🏆 <b>Goal reached</b>' : '⏸ <b>Paused</b>';
   return `${t.icon || '⏱'} <b>${esc(t.name)}</b> · ${fmtDate(day)}\n\n${bar(ms / goal)} <b>${Math.floor(ms / goal * 100)}%</b>\n`
@@ -353,6 +387,16 @@ async function tgLoop() {
     } catch (e) { tgStatus('Telegram error: ' + e.message); }
   }
   tgBusy = false;
+}
+// Sound without clutter: Telegram never makes a sound for EDITS, only for new messages.
+// So: send a tiny message with sound, delete it a few seconds later. The phone has already pinged.
+async function tgPing(text) {
+  const c = tgCfg();
+  if (!tgOn() || c.pings === false) return;
+  try {
+    const r = await tgApi('sendMessage', { chat_id: c.chat, text, parse_mode: 'HTML' });
+    if (r.ok) setTimeout(() => tgApi('deleteMessage', { chat_id: c.chat, message_id: r.result.message_id }).catch(() => {}), 8000);
+  } catch (e) {}
 }
 async function tgGoal(t, ms) {                       // the only NEW message of the day for a task, with sound
   const c = tgCfg();
@@ -398,7 +442,8 @@ function tgCard() {
     <div class="muted small">One live message per task per day, edited in place. Token and chat ID stay in this browser only and are never exported.</div>
     <label class="f">Bot token<input class="input" id="tgToken" type="password" autocomplete="off" placeholder="123456:ABC…" value="${esc(c.token || '')}"></label>
     <label class="f">Chat ID<input class="input" id="tgChat" inputmode="numeric" autocomplete="off" placeholder="send /start to your bot, then press “Find my chat ID”" value="${esc(c.chat || '')}"></label>
-    <label class="row small"><input type="checkbox" id="tgGoal" ${c.goalNotify === false ? '' : 'checked'}> Send one extra message (with sound) when I reach a goal</label>
+    <label class="row small"><input type="checkbox" id="tgGoal" ${c.goalNotify === false ? '' : 'checked'}> Keep one message (with sound) when I reach a goal</label>
+    <label class="row small"><input type="checkbox" id="tgPings" ${c.pings === false ? '' : 'checked'}> Sound pings on start, pause and 25/50/75% (deleted after 8 s, so the chat stays clean)</label>
     <div class="row"><button class="btn" id="tgFind">Find my chat ID</button><button class="btn primary" id="tgSave">Save &amp; connect</button><button class="btn" id="tgTest">Send test</button><button class="btn danger" id="tgOff">Disconnect</button></div>
     <div class="small muted" id="tgStatus">${esc(tgInfo)}</div>
   </div></details>`;
@@ -408,7 +453,7 @@ function tgCard() {
 const dayKeys = () => Object.keys(S.days).sort();
 function longestStreak(t) {
   let best = 0, cur = 0, prev = null;
-  for (const k of dayKeys()) if (status(k, t) === 'yes') { cur = prev && addDays(prev, 1) === k ? cur + 1 : 1; best = Math.max(best, cur); prev = k; }
+  for (const k of dayKeys()) if (counts(k, t)) { cur = prev && addDays(prev, 1) === k ? cur + 1 : 1; best = Math.max(best, cur); prev = k; }
   return best;
 }
 function totalMs() { let n = 0; for (const k of dayKeys()) for (const t of S.tasks) n += msOf(k, t.id); return n; }
@@ -470,7 +515,7 @@ function milestones(t, ms, goal) {
   for (const [key, thr, msg] of steps) {
     const k = `${todayKey()}:${t.id}:${key}`;
     if (miles[k] === undefined) { miles[k] = ms >= thr; continue; }   // first look: silent, no replay after reload
-    if (!miles[k] && ms >= thr) { miles[k] = true; toast(`${t.name}: ${msg}`, 4500); }
+    if (!miles[k] && ms >= thr) { miles[k] = true; toast(`${t.name}: ${msg}`, 4500); tgPing(`${t.icon || ''} <b>${esc(t.name)}</b>: ${msg}`); }
   }
 }
 
@@ -546,7 +591,7 @@ document.addEventListener('click', e => {
   if (b.id === 'tgSave') {
     const token = $('#tgToken').value.trim(), chat = $('#tgChat').value.trim();
     if (!token || !chat) return tgStatus('Token and chat ID are both needed.');
-    localStorage.setItem(TGKEY, JSON.stringify({ token, chat, goalNotify: $('#tgGoal').checked }));
+    localStorage.setItem(TGKEY, JSON.stringify({ token, chat, goalNotify: $('#tgGoal').checked, pings: $('#tgPings').checked }));
     tgStatus('Saved. Connecting…'); tgSync(); tgPoll(); return toast('Telegram connected');
   }
   if (b.id === 'tgTest') return (async () => {
