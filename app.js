@@ -102,6 +102,7 @@ function status(day, t) {
   if (d && d.covered) return 'near';
   return day < todayKey() ? 'no' : null;
 }
+const counts = (day, t) => { const s = status(day, t); return s === 'yes' || s === 'near'; };
 
 /* ---------- timer (timestamp based, so it is exact even if the tab sleeps) ---------- */
 function commit(now = Date.now()) {
