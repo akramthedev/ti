@@ -59,42 +59,49 @@ function msOf(day, id) {
   return ms;
 }
 const goalMs = t => t.goalMin * 60000;
-// Ledger instead of a cliff. No percentages decide anything, only minutes:
-//   balance = (minutes worked - goal), carried from day to day, capped at +-1 goal.
-//   Overtime is banked and covers the next day. A shortfall is a debt, repaid by extra time the next day.
-//   yes     = reached 100% of the goal that day
-//   near    = below 100% but covered: you worked, and the ledger is square by the end of that day or the next
-//   no      = past day, you worked too little and it was not repaid (still shows its real %, never zero)
+// Ledger instead of a cliff. No percentages decide anything, only minutes, and only between NEIGHBOUR days:
+//   - overtime on a day is banked for the NEXT day only (covers its shortfall)
+//   - a shortfall is a debt for the NEXT day only: do that many extra minutes and the short day counts
+//   - nothing chains: old debt expires after one day, so you never owe more than ONE day's own gap
+//   yes  = reached 100% of the goal that day
+//   near = below 100% but covered by banked overtime or repaid the next day (you must have worked that day)
+//   no   = past day, too little work and not repaid (still shows its real time, never zero)
 const ratio = (day, t) => msOf(day, t.id) / goalMs(t);
 let ledgerCache = {};
 function ledger(t) {
   const sec = Math.floor(Date.now() / 1000), c = ledgerCache[t.id];
   if (c && c.sec === sec) return c.v;
   const goal = goalMs(t), v = {}, t0 = todayKey();
-  let k = dayKeys()[0] && dayKeys()[0] < S.since ? dayKeys()[0] : S.since, bal = 0;
+  let k = dayKeys()[0] && dayKeys()[0] < S.since ? dayKeys()[0] : S.since, prev = null, credit = 0, debt = 0;
   for (; k <= t0; k = addDays(k, 1)) {
-    const ms = msOf(k, t.id);
-    bal = Math.max(-goal, Math.min(goal, bal + ms - goal));
-    v[k] = { ms, bal };
+    const ms = msOf(k, t.id), d = v[k] = { ms, covered: false, need: 0 };
+    if (ms >= goal) {
+      let extra = ms - goal;
+      if (prev && debt > 0) {                           // overtime repays yesterday's debt first
+        const pay = Math.min(debt, extra); debt -= pay; extra -= pay;
+        if (debt === 0) prev.covered = true; else prev.need = debt;
+      }
+      credit = extra; debt = 0;                          // what is left is banked for tomorrow only
+    } else {
+      let need = goal - ms;
+      if (credit > 0 && ms > 0) need -= Math.min(credit, need);  // yesterday's banked overtime
+      if (prev && debt > 0) prev.need = debt;            // yesterday's debt was not repaid: it expires
+      credit = 0;
+      if (ms > 0 && need === 0) d.covered = true;
+      d.need = ms > 0 ? need : 0;
+      debt = d.need;
+    }
+    prev = d;
   }
   ledgerCache[t.id] = { sec, v };
   return v;
 }
-// minutes still owed from yesterday (0 when square). Doing this much EXTRA today makes yesterday count.
-function owed(t) {
-  const L = ledger(t), y = addDays(todayKey(), -1), today = L[todayKey()];
-  if (!(L[y] && L[y].ms > 0 && L[y].ms < goalMs(t) && L[y].bal < 0 && today)) return 0;
-  // unclamped on purpose: today's goal + yesterday's missing time, minus what today already has
-  return Math.max(0, goalMs(t) + -L[y].bal - today.ms);
-}
 function status(day, t) {
-  const L = ledger(t), d = L[day];
+  const d = ledger(t)[day];
   if (d && d.ms >= goalMs(t)) return 'yes';
-  const n = d && L[addDays(day, 1)];
-  if (d && d.ms > 0 && (d.bal >= 0 || (n && n.ms > 0 && n.bal >= 0))) return 'near';
+  if (d && d.covered) return 'near';
   return day < todayKey() ? 'no' : null;
 }
-const counts = (day, t) => { const s = status(day, t); return s === 'yes' || s === 'near'; };
 
 /* ---------- timer (timestamp based, so it is exact even if the tab sleeps) ---------- */
 function commit(now = Date.now()) {
@@ -266,7 +273,6 @@ function taskCard(t, isToday) {
           ? `<button class="btn primary lg" data-stop style="flex:1">❚❚ Pause</button>`
           : `<button class="btn primary lg" data-start="${t.id}" style="flex:1">▶ ${msOf(viewDay, t.id) > 0 ? 'Resume' : 'Start'} timer</button>`}
       </div>` : ''}
-      ${isToday && owed(t) > 0 ? `<div class="small">↩ Yesterday was ${hm(goalMs(t) - ledger(t)[addDays(todayKey(), -1)].ms)} short. Do <b>${hm(owed(t))}</b> more today (today's goal plus the missing time) and yesterday counts.</div>` : ''}
       <div class="lockline small">🔒 Only the timer counts. No manual edits, no skipping.</div>
     </div></section>`;
 }
